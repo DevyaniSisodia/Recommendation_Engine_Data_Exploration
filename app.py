@@ -4,16 +4,15 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 import pickle
 import os
+from image_processor import ImageProcessor
 
 app = Flask(__name__)
 
 # Load our recommendation model and data
-# In a real project, you'd save these using pickle
-# For now, we'll recreate them when the app starts
 def load_recommendation_data():
-    global purchase_matrix, model, df_clean
+    global purchase_matrix, model, df_clean, image_processor
     
-    # Load and clean data (simplified from earlier code)
+    # Load and clean data
     df = pd.read_excel('online_retail.xlsx')
     df_clean = df.dropna(subset=['CustomerID'])
     df_clean['CustomerID'] = df_clean['CustomerID'].astype(int)
@@ -35,6 +34,14 @@ def load_recommendation_data():
     # Create model
     model = NearestNeighbors(metric='cosine', algorithm='brute')
     model.fit(item_matrix_normalized)
+    
+    # Create image processor if folder exists
+    if os.path.exists("product_images"):
+        image_processor = ImageProcessor("product_images")
+        image_processor.process_image_folder()
+    else:
+        image_processor = None
+        print("No product images folder found. Image-based recommendations will be unavailable.")
     
     print("Recommendation data loaded successfully!")
 
@@ -71,9 +78,17 @@ def recommend_item_api(item_id):
         recommendations = []
         for item in similar_items:
             desc = df_clean[df_clean['StockCode'] == item]['Description'].iloc[0]
-            recommendations.append({"item_id": item, "description": desc})
+            recommendations.append({"item_id": item, "description": desc, "type": "collaborative"})
         
-        return jsonify(recommendations)
+        # Get image-based recommendations if available
+        if image_processor and item_id in image_processor.image_features:
+            img_similar_items = image_processor.find_similar_images(item_id)
+            for item in img_similar_items:
+                if item in df_clean['StockCode'].values:
+                    desc = df_clean[df_clean['StockCode'] == item]['Description'].iloc[0]
+                    recommendations.append({"item_id": item, "description": desc, "type": "image-based"})
+        
+        return jsonify(recommendations[:num_recommendations])
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -118,6 +133,36 @@ def recommend_user_api(user_id):
                     break
         
         return jsonify(unique_recommendations)
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# New endpoint for image-based recommendations only
+@app.route('/recommend/image/<item_id>', methods=['GET'])
+def recommend_image_api(item_id):
+    try:
+        # Check if image processor is available
+        if not image_processor:
+            return jsonify({"error": "Image-based recommendations not available"}), 503
+            
+        # Check if item exists
+        if item_id not in image_processor.image_features:
+            return jsonify({"error": "Item image not found"}), 404
+        
+        # Get number of recommendations from query parameters
+        num_recommendations = int(request.args.get('num', 5))
+        
+        # Get similar items based on image
+        similar_items = image_processor.find_similar_images(item_id, num_recommendations)
+        
+        # Get the item descriptions
+        recommendations = []
+        for item in similar_items:
+            if item in df_clean['StockCode'].values:
+                desc = df_clean[df_clean['StockCode'] == item]['Description'].iloc[0]
+                recommendations.append({"item_id": item, "description": desc})
+        
+        return jsonify(recommendations)
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
